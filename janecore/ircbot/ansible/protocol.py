@@ -1,36 +1,43 @@
 import pickle
 
+from twisted.internet.protocol import ClientFactory
+from twisted.internet import ssl
+from twisted.internet.error import ConnectionLost
 from twisted.internet.protocol import Protocol
 from twisted.protocols import amp
 from twisted.python import log
 from twisted.internet import defer, reactor
 import commands
+from time import sleep
+
+class restartFactory(ClientFactory):
+    protocol = None
 
 class AnsibleProtocol(amp.AMP):
     """
     Protocol to allow a bot plugin client communicate
     with a Jane server.
     """
-    timeout=300
     def connectionMade(self):
         if self.factory.number_of_connections >= self.factory.max_connections:
             self.transport.write("Too many active plugins.")
             log.msg("Dropping plugin connection attempt")
             self.transport.oseConnection()
             return
-        
+
         self.factory.number_of_connections += 1
         self.identifier = self.factory.number_of_connections
 
         # TODO: should try to let the other side know why they're being
         # disconnected.
-        self.timeout_deferred = reactor.callLater(self.__class__.timeout,
-                self.transport.loseConnection)
+        #self.timeout_deferred = reactor.callLater(self.__class__.timeout,
+        #        self.transport.loseConnection)
         amp.AMP.connectionMade(self)
-    
+        print amp.AMP
+
     def connectionLost(self, reason):
         """ Called when a connection is lost """
-        log.msg("Connection Lost: %s" % reason)
+        log.msg("Connection Lost: %s" % dir(reason))
         self.factory.evt_mgr.removeListenerByValue(self.callback)
 
     @defer.inlineCallbacks
@@ -62,11 +69,12 @@ class AnsibleProtocol(amp.AMP):
 class AnsibleClientProtocol(amp.AMP):
     """ Base client protocol for jane's ansible plugin system"""
     EVENTS = []
-    def __init__(self):
 
+    def __init__(self):
+        super(AnsibleClientProtocol, self).__init__()
         # {eventname : callback method}
         self.remote_event_registry = {}
-    
+
     def connectionMade(self):
         """ Called when connection made """
         print ("Ansible plugin connected to server")
@@ -75,11 +83,16 @@ class AnsibleClientProtocol(amp.AMP):
                 self.registerRemote(event, getattr(self, event + "Callback"))
             except AttributeError:
                 print "Event callback not found, skipping: %s" % event
-    
-    def connectionLost(self, reason):
-        log.msg("Connection lost: %s, I will not attempt to recover" % reason)
-        reactor.stop()
-        
+
+    def connectionLost(self, reason, count=0):
+        log.msg("Connection lost: %s, `attempt to recover %d more times" % (reason, 10 - count, ))
+        if reason.type == ConnectionLost:
+            sleep(120)
+            restartFactory.protocol = self.__class__
+            factory = restartFactory()
+            connector = reactor.connectSSL("localhost", 1677, factory, ssl.ClientContextFactory())
+
+
     @defer.inlineCallbacks
     def registerRemote(self, eventname, callback):
         """ Register a callback from the remote event system """
@@ -98,3 +111,4 @@ class AnsibleClientProtocol(amp.AMP):
             raise ValueError("Received event that's not registered locally")
         reactor.callLater(0, self.remote_event_registry[event_name], data)  
         return {}
+
